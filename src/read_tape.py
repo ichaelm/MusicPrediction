@@ -17,10 +17,13 @@ time = 0
 for label in roll.labels:
 	pp.pprint(vars(label))
 
-	# use label to find tape
-	# tape = pickle.load( open(label.filename, 'rb') )
-
-	tape = roll.tapes[label.index]
+	if roll.self_contained:
+		# use label to find file to find tape
+		tape = roll.tapes[label.index]
+	else:
+		# use label to find tape
+		tape = pickle.load( open(label.filename, 'rb') )
+	
 	pp.pprint(vars(tape))
 
 	# data = struct.unpack(tape.packtype, tape.data)

@@ -8,8 +8,6 @@ import numpy as np
 import os
 from mido import MidiFile, MetaMessage
 from MusicRoll import *
-# from pycallgraph import PyCallGraph
-# from pycallgraph.output import GraphvizOutput
 
 verbosity = 0
 outlier_threshold = 0.001
@@ -22,19 +20,18 @@ class MidiNormalizer:
 		self.tempo = 500000
 		self.started = False
 		self.channels = {}
-		self.fullen_dist = {} # also grouped by tempo... a dictionary of dictionaries
-		self.final_channels = {} # channel lists grouped by tempo
+		# channel lists grouped by tempo
+		self.final_channels = {}
+		# also grouped by tempo... a dictionary of dictionaries
+		self.fullen_dist = {}
 
+	# finalize channel
 	def channel_done(self, n):
-		# finalize channel
 		self.channels[n].cleanupTimes()
 		self.channels[n].convert_to_events()
-		# DANGER: NOTE CUT IN HALF BY CHANNEL_DONE?
+		# TODO: Avoid note(s) from being divided by this function
+		# in the case that there is a tempo change in the middle of notes
 		
-		# TODO!
-		# for all active notes in old channel, move to new channel
-		# while beginning them at the time of chop
-
 		if self.tempo not in self.final_channels:
 			self.final_channels[self.tempo] = []
 		self.final_channels[self.tempo].append(self.channels[n])
@@ -46,7 +43,6 @@ class MidiNormalizer:
 		for event in self.midiFile:
 			self.time += self.getTicks(event.time)
 			if isinstance(event, MetaMessage):
-				# print(event, event.type)
 				if event.type == 'set_tempo':
 					self.tempo = event.tempo
 					# tempo change after file has already begun
@@ -54,24 +50,24 @@ class MidiNormalizer:
 						print("Performing tempo separation")
 						for n, channel in self.channels.items():
 							self.channel_done(n)
-							# new full-length count
 				elif event.type == 'end_of_track':
-					if verbosity > 0:
-						print("Total ticks:", self.time)
-					
+					print("Total time:", self.time)
 					for n, channel in self.channels.items():
 						self.channel_done(n)
 			# have we seen this channel before?
 			else:
-				try: # CHANNEL NINE IS ALWAYS PERCUSSION!
-					if event.channel != 9:
+				try:
+					# channel 9 is always for percussion (in GM standard MIDI)
+					if event.type == 'sysex':
+						print("Unhandled sysex:",event)
+					elif event.channel != 9:
 						if event.channel not in self.channels:
 							self.channels[event.channel] = ChannelNormalizer(self, event.channel, self.time)
 						self.channels[event.channel].handle_event(event)
 				except AttributeError as e:
 					print(event, e)
 
-	# tempo is a global phenomenon
+	# tempo is a global phenomenon - this takes care of inserting to dictionary
 	def count_full_length(self, length):
 		if self.tempo not in self.fullen_dist:
 			self.fullen_dist[self.tempo] = {}
@@ -81,7 +77,7 @@ class MidiNormalizer:
 		else:
 			self.fullen_dist[self.tempo][length] = 1
 
-	# Finish - actually do the normalizing
+	# Finish - perform normalization
 	def normalize(self, chop_loss_percent):
 		self.extract_events() # TODO - maybe bad practice to forcibly run this function here
 
@@ -101,32 +97,25 @@ class MidiNormalizer:
 			self.fullen_dist[tempo] = self.fullen_dist[tempo][self.fullen_dist[tempo][:,0].argsort()]
 
 			# if verbosity > 0:
-				# print("Minimum full length:", minimum_full_length)
+				# print("Minimum full length:", unit_len)
 			if verbosity > 1:
 				print("Full Length Occurences:")
 				print(self.fullen_dist[tempo])
 
-			# sort by occurence from greatest to least
-			# self.fullen_dist[tempo] = self.fullen_dist[tempo][self.fullen_dist[tempo][:,1].argsort(-1)][::-1]
 			total_notes = np.sum(self.fullen_dist[tempo][:,1])
-		
 			print("Total notes:", total_notes)
 			
-			# print(self.fullen_dist[tempo])
+			# most common lengths - sort according to occurrence, chop
+			common = self.fullen_dist[tempo][self.fullen_dist[tempo][:,1].argsort(-1)][::-1]
+			i = median_index(common[:,1], total_notes)
+			# smallest of most common lengths
+			mincommon = np.min(common[:,0])
 
-			# we do a weighted linear fit to try and find the slope.
-			# use coordinates (nearest multiple of slope, length)
-			# the "weight" of each len-freq pair is the freq
 			# find the "median" occurrence of notes and try every length shorter than that
-			# penalize excessively small intervals
-
-			# cost: how many are mismatched
-			# (LEN - closestmultiple(LEN, CANDIDATE)) * COUNT
-			i = 0
-			ctr_counts = 0
-			while ctr_counts < (total_notes / 2):
-				ctr_counts += self.fullen_dist[tempo][i,1]
-				i += 1
+			# mismatch metric penalizes misfits,
+			# MISMATCH = (LEN - closestmultiple(LEN, CANDIDATE)) * COUNT
+			# TODO also excessively small intervals, such as "1"
+			i = median_index(self.fullen_dist[tempo][:,1], total_notes)
 
 			# cutoff index is i
 			# second col will be replaced with loss
@@ -153,13 +142,17 @@ class MidiNormalizer:
 				candidates = np.vstack((next_r[0], [next_r[0,2], 0, 0])) # set up check for potential next candidate
 
 			# candidates have been obtained
-			unit_len = candidates[0,0]
+			# unit length should be halved to distinguish sequential notes from sustained notes
+			# (allow note decay)
+			unit_len = candidates[0,0] // 2
+			# express minimum common length in terms of unit_length
+			mincommon //= unit_len
 
-			print("Unit length for tempo group {0} is {1}".format(tempo, unit_len))
+			print("Unit length for tempo group {0} is {1},\n\t with {2} times unit_len being most common".format(tempo, unit_len, mincommon))
 
 			# adjust all channels in the tempo group
 			for channel in tempogroup:
-				channel.normalize_events(unit_len)
+				channel.normalize_to_tape(unit_len, mincommon)
 
 	# also a mutating operation
 	def candidate_loss_mut(self, candidates, full_lengths):
@@ -178,6 +171,14 @@ class MidiNormalizer:
 		ticks = time / sec_per_tick
 		return round(ticks)
 
+def median_index(array, maxm):
+	i = 0
+	count = 0
+	while count < (maxm / 2):
+		count += array[i]
+		i += 1
+	return i
+
 def iter_midis_in_path(folder_path):
     for root, dirs, files in os.walk(folder_path):
         for file in files:
@@ -194,6 +195,7 @@ class ChannelNormalizer:
 		self.noteLengths = []
 		self.events = []
 		self.start_time = start_time
+		self.volume = [1.000, 1.000] # one for volume, one for expression
 
 	def cleanupTimes(self):
 		toDelete = []
@@ -208,16 +210,15 @@ class ChannelNormalizer:
 
 	def noteOn(self, event):
 		# initial activation
-		self.activeNotes[event.note] = [True, self.owner.time, 0, 0, event.velocity] # flag, activation tick, on-off duration tick, on-off-next_on tick, velocity
+		# flag, activation tick, on-off duration tick, on-off-next_on tick, discretized velocity
+		self.activeNotes[event.note] = [True, self.owner.time, 0, 0, round(event.velocity * self.volume[0] * self.volume[1])]
 		# boolean is a 'downtime flag': true if note was just turned on, false if off but next note not fired (downtime)
 		self.cleanupTimes() # clear downtimes for ready notes
-		# print(event.note, event.velocity, '\ton  @ time\t', self.owner.time, 'after', self.owner.getTicks(event.time), 'ticks')
 
 	def noteOff(self, event):
 		if event.note in self.activeNotes:
 			self.activeNotes[event.note][0] = False
 			self.activeNotes[event.note][2] = self.owner.time - self.activeNotes[event.note][1] # length from on to off
-		# print(event.note, '  \toff @ time\t', self.owner.time, 'after', self.owner.getTicks(event.time), 'ticks')
 
 	def handle_event(self, event):
 		if event.type == 'note_on':
@@ -240,9 +241,9 @@ class ChannelNormalizer:
 			pass # TODO
 		elif event.type == 'control_change':
 			if event.control == 7: # track volume
-				pass # TODO
+				self.volume[0] = event.value / 127.0
 			elif event.control == 11: # track expression - percentage of volume
-				pass # TODO
+				self.volume[1] = event.value / 127.0
 		else:
 			print("Warning: Type not covered:", event)
 			
@@ -254,8 +255,7 @@ class ChannelNormalizer:
 		lens = np.array(self.noteLengths).astype(float)
 		
 		if verbosity > 5:
-			print("lengths:")
-			print("\t[NOTE ON_TIME NOTE_DURATION VELOCITY FULLTIME DOWNTIME]")
+			print("lengths:\n\t[NOTE ON_TIME NOTE_DURATION VELOCITY FULLTIME DOWNTIME]")
 			for row in lens.astype(int):
 				print('\t{}'.format(row))
 
@@ -267,11 +267,6 @@ class ChannelNormalizer:
 		for full_length in lens[:-1,4]:
 			self.owner.count_full_length(full_length)
 		
-		# factor =  minimum_full_length / ratio
-
-		# lens[:,1] = np.round(lens[:,1] / factor) # on_time - old style round before write
-		# lens[:,2] = np.round(lens[:,2] / factor) # duration
-
 		# normalize, convert to tuples of (NOTE, ON_TIME, DURATION, VELOCITY)
 		lens = lens.astype(int)[:,0:4]
 
@@ -291,25 +286,22 @@ class ChannelNormalizer:
 			print("\t[TIME ON/OFF NOTE VELOCITY]")
 			for event in events:
 				print('\t', event)
-			# print("Raw time diffs:")
-			# print('\t', np.diff(events[:,0]))
 
 		self.events = events
 
-	def normalize_events(self, minimum_full_length):
-
+	def normalize_to_tape(self, unit_len, min_common):
 		# normalize times
 		events = self.events
-		events[:, 0] = np.round(events[:, 0] / minimum_full_length)
+		events[:, 0] = np.round(events[:, 0] / unit_len)
 		
 		# Separate time and note events for easy processing
-		tick = 0
 		tape = self.owner.roll.appendAbsoluteTape(
 			self.start_time,
 			self.owner.tempo,
 			self.instrument,
 			self.num,
-			minimum_full_length) # note count
+			unit_len,
+			min_common) # note count
 
 		print("Event count:", np.size(events, 0))
 
@@ -318,6 +310,7 @@ class ChannelNormalizer:
 			for event in events:
 				print(event)
 
+		tick = 0
 		for i in range(0, events.shape[0]):
 			if events[i][0] > tick:
 				tape.addTimeEvent(events[i][0] - tick)
@@ -327,6 +320,8 @@ class ChannelNormalizer:
 		print("Finished channel", self.num)
 		tape.finalize()
 
+# from pycallgraph import PyCallGraph
+# from pycallgraph.output import GraphvizOutput
 if __name__ == "__main__":
 	# with PyCallGraph(output=GraphvizOutput()):
 	for path, file in iter_midis_in_path('.'):
@@ -334,16 +329,4 @@ if __name__ == "__main__":
 		midi = MidiFile(path)
 
 		MidiNormalizer(roll, midi).normalize(chop_loss_percent = 0.002) # 0.2 percent
-		# roll.dump()
-		pickle.dump(roll, open(roll.filepath, 'bw'))
-
-		# debug
-		# for event in midi:
-			# if (event.type != 'note_on' and event.type != 'note_off'):
-			# print(event)
-
-		# for i, track in enumerate(midi.tracks):
-			# print('Track {}: {}'.format(i, track.name))
-			# if i is 10:
-				# for message in track:
-					# print(message)
+		roll.dump(self_contained = False)
