@@ -41,7 +41,11 @@ class MidiNormalizer:
 
 	def extract_events(self):
 		for event in self.midiFile:
-			self.time += self.getTicks(event.time)
+			# sec per beat = tempo / million
+			# sec per tick = sec per beat / ticks per beat
+			# ticks = time / sec per tick = time / (spb/tpb) = tpb * t / spb = tpb * t / (tmp / mill) = tpb * t * mill / tmp
+			self.time += round(event.time * float(self.midiFile.ticks_per_beat) * 1000000.0 / self.tempo)
+
 			if isinstance(event, MetaMessage):
 				if event.type == 'set_tempo':
 					self.tempo = event.tempo
@@ -165,12 +169,6 @@ class MidiNormalizer:
 			candidate_row[1] = loss
 		return loss
 
-	def getTicks(self, time):
-		sec_per_beat = self.tempo / 1000000.0
-		sec_per_tick = sec_per_beat / float(self.midiFile.ticks_per_beat)
-		ticks = time / sec_per_tick
-		return round(ticks)
-
 def median_index(array, maxm):
 	i = 0
 	count = 0
@@ -244,6 +242,8 @@ class ChannelNormalizer:
 				self.volume[0] = event.value / 127.0
 			elif event.control == 11: # track expression - percentage of volume
 				self.volume[1] = event.value / 127.0
+			elif event.control == 120 or event.control == 123:
+				pass # TODO all notes off
 		else:
 			print("Warning: Type not covered:", event)
 			
@@ -325,6 +325,7 @@ class ChannelNormalizer:
 if __name__ == "__main__":
 	# with PyCallGraph(output=GraphvizOutput()):
 	for path, file in iter_midis_in_path('.'):
+		print("\nProcessing '{0}'".format(file))
 		roll = MusicRoll(path, labels = [], tapes = [])
 		midi = MidiFile(path)
 

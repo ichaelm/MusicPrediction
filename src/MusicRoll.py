@@ -51,21 +51,31 @@ class MusicTape:
 	# initialBasis
 	def __init__(self, data=[], tempo=500000, hasBasis=False, startTime=0, instrument=0):
 		self.data = data
+		self.ticks = 0 # how many ticks
 		self.tempo = tempo
 		self.hasBasis = hasBasis
 		self.startTime = startTime
 		self.instrument = instrument
+		self.min_note = 127
+		self.max_note = 0
 
 	def addNoteEvent(self, etype, note, velocity):
 		self.data.append( [etype, note, velocity] )
+		if note > self.max_note:
+			self.max_note = note
+		if note < self.min_note:
+			self.min_note = note
 
 	def addTimeEvent(self, length):
 		self.data.append( [MusicTape.TIME_CHANGE, length // 256, length % 256] )
-		# self.data.append( [MusicTape.TIME_CHANGE, length] )
+		self.ticks += length
 
 	def finalize(self):
 		self.bytecount = len(self.data) * 3
-		self.packtype = '>' + str(self.bytecount) + 'H'
+		self.packtype = '>' + str(self.bytecount) + 'B'
 		self.data = np.array(self.data).flatten()
 		self.data = struct.pack(self.packtype, *self.data)
-		pass
+
+	def unpack_data(self):
+		data = struct.unpack(self.packtype, self.data)
+		return np.array(data).reshape(len(data)//3, 3)
