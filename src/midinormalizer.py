@@ -2,14 +2,20 @@
 # Zicheng (Brian) Gao
 # Parse MIDI. Different tempos necessitate different sections.
 
-# TODO: Dealing with zero-length notes / avoiding percussion
-
 import numpy as np
 import os
 from mido import MidiFile, MetaMessage
 from MusicRoll import *
 
 verbosity = 0
+
+show_full_length_occurrences = False
+show_note_info = False
+show_onset_time_diffs = False
+show_raw_time_events = False
+show_normalized_events = True
+show_tape_data = False
+
 outlier_threshold = 0.001
 
 class MidiNormalizer:
@@ -60,16 +66,13 @@ class MidiNormalizer:
 						self.channel_done(n)
 			# have we seen this channel before?
 			else:
-				try:
-					# channel 9 is always for percussion (in GM standard MIDI)
-					if event.type == 'sysex':
-						print("Unhandled sysex:",event)
-					elif event.channel != 9:
-						if event.channel not in self.channels:
-							self.channels[event.channel] = ChannelNormalizer(self, event.channel, self.time)
-						self.channels[event.channel].handle_event(event)
-				except AttributeError as e:
-					print(event, e)
+				# channel 9 is always for percussion (in GM standard MIDI)
+				if event.type == 'sysex':
+					print("Unhandled sysex:",event)
+				elif event.channel != 9:
+					if event.channel not in self.channels:
+						self.channels[event.channel] = ChannelNormalizer(self, event.channel, self.time)
+					self.channels[event.channel].handle_event(event)
 
 	# tempo is a global phenomenon - this takes care of inserting to dictionary
 	def count_full_length(self, length):
@@ -100,10 +103,8 @@ class MidiNormalizer:
 
 			self.fullen_dist[tempo] = self.fullen_dist[tempo][self.fullen_dist[tempo][:,0].argsort()]
 
-			# if verbosity > 0:
-				# print("Minimum full length:", unit_len)
-			if verbosity > 1:
-				print("Full Length Occurences:")
+			if show_full_length_occurrences:
+				print("Full Length Occurrences:")
 				print(self.fullen_dist[tempo])
 
 			total_notes = np.sum(self.fullen_dist[tempo][:,1])
@@ -115,10 +116,9 @@ class MidiNormalizer:
 			# smallest of most common lengths
 			mincommon = np.min(common[:,0])
 
-			# find the "median" occurrence of notes and try every length shorter than that
-			# mismatch metric penalizes misfits,
-			# MISMATCH = (LEN - closestmultiple(LEN, CANDIDATE)) * COUNT
-			# TODO also excessively small intervals, such as "1"
+			# try note lengths smaller than median of occurrences
+			# COST = (LEN - closestmultiple(LEN, CANDIDATE)) * COUNT
+			# TODO: Penalize excessively small intervals, such as "1" ?
 			i = median_index(self.fullen_dist[tempo][:,1], total_notes)
 
 			# cutoff index is i
@@ -254,12 +254,12 @@ class ChannelNormalizer:
 		
 		lens = np.array(self.noteLengths).astype(float)
 		
-		if verbosity > 5:
+		if show_note_info:
 			print("lengths:\n\t[NOTE ON_TIME NOTE_DURATION VELOCITY FULLTIME DOWNTIME]")
 			for row in lens.astype(int):
 				print('\t{}'.format(row))
 
-		if verbosity > 2:
+		if show_onset_time_diffs:
 			print("Time diffs between onsets:")
 			print(np.diff(lens.astype(int)[:,1]))
 
@@ -281,7 +281,7 @@ class ChannelNormalizer:
 
 		# Sort by on-time
 		events = events[events[:,0].argsort()]
-		if verbosity > 2:
+		if show_raw_time_events:
 			print("Raw-time events:")
 			print("\t[TIME ON/OFF NOTE VELOCITY]")
 			for event in events:
@@ -305,7 +305,7 @@ class ChannelNormalizer:
 
 		print("Event count:", np.size(events, 0))
 
-		if verbosity > 10:
+		if show_normalized_events:
 			print("Events:")
 			for event in events:
 				print(event)
@@ -316,6 +316,11 @@ class ChannelNormalizer:
 				tape.addTimeEvent(events[i][0] - tick)
 				tick = events[i][0]
 			tape.addNoteEvent(events[i][1], events[i][2], events[i][3])
+
+		if show_tape_data:
+			print("Tape data:")
+			for event in tape.data:
+				print(event)
 		
 		print("Finished channel", self.num)
 		tape.finalize()

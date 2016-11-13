@@ -79,3 +79,41 @@ class MusicTape:
 	def unpack_data(self):
 		data = struct.unpack(self.packtype, self.data)
 		return np.array(data).reshape(len(data)//3, 3)
+
+	def timeseries(self, relative = False):
+		# time, note, [velocity, newness]
+		if relative:
+			timeseries = np.zeros((self.ticks + 1, self.max_note - self.min_note + 1, 2))
+		else:
+			timeseries = np.zeros((self.ticks + 1, 127, 2))
+
+		def relative_note(absolute_note):
+			if relative:
+				return absolute_note - self.min_note
+			else:
+				return absolute_note
+
+		i = 0
+		data = self.unpack_data()
+		for event in data:
+			if event[0] == MusicTape.NOTE_ON:
+				# note event
+				timeseries[i, relative_note(event[1]), 0] = event[2] / 127.0
+				timeseries[i, relative_note(event[1]), 1] = 1
+				# print('Note on:', relative_note(event[1]), 'with velocity', event[2])
+			elif event[0] == MusicTape.NOTE_OFF:
+				timeseries[i, relative_note(event[1]), 0] = event[2] / 127.0
+				# print('Note off:', relative_note(event[1]), 'with velocity', event[2])
+			elif event[0] == MusicTape.BASIS_CHANGE:
+				# print('Basis changed to', event[1])
+				pass # TODO - not implemented
+			elif event[0] == MusicTape.TIME_CHANGE:
+				next_pointer = i + 256 * event[1] + event[2]
+				# only carry over note slice
+				timeseries[i + 1:next_pointer + 1, :, 0] = timeseries[i, :, 0]
+				i = next_pointer
+				# print('Process loops:', 256 * event[1] + event[2])
+			else:
+				print('Unknown event!')
+
+		return timeseries
