@@ -1,11 +1,13 @@
 # Attribute basis to MRL - (do not individually apply to MTP)
 
 # http://www.music.mcgill.ca/~jason/mumt621/papers5/fujishima_1999.pdf ?
+# https://www.jstor.org/stable/pdf/40285717.pdf
 
 # Zicheng (Brian) Gao
 
 from MusicRoll import *
-import tensions
+import TensionModule
+import PPMBasis
 import numpy as np
 import pickle
 import pprint
@@ -17,282 +19,281 @@ import matplotlib.pyplot as plt
 from mpl_toolkits.axes_grid1 import AxesGrid
 # from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 
-pp = pprint.PrettyPrinter(indent=4)
+__verbose = False
+__block = True
+__report_interval = 100
+__hard_limit = 1000
 
-# roll = pickle.load(open('./mid/mary.mrl', 'rb'))
-# roll = pickle.load(open('./mid/oldyuanxian2.mrl', 'rb'))
-# roll = pickle.load(open('./mid/start_offset.mrl', 'rb'))
-roll = pickle.load(open('./mid/ambigious_test.mrl', 'rb')) # lowsim 0.3 - 0.35
-# roll = pickle.load(open('./mid/ivivi.mrl', 'rb')) # lowsim 0.5
-# roll = pickle.load(open('./mid/two_channel_test.mrl', 'rb'))
-# roll = pickle.load(open('./mid/channel_sep.mrl', 'rb'))
+# parameters:
 
-pp.pprint(vars(roll))
+attn_decay = 0.3 # decay by this much from note onsets
+n_smoothing = 0.0 # forward smoothing on notes
 
-time = 0
-attn_decay = 0.3 # decay BY this much
-w_lmin = 4 # minimum window size for labelling
-w_emin = 4 # maximum hiccup size - for dealing with neighbour tones and _small_ interruptions in basis
-
-# threshold for ambiguosity - for the most likely basis, candidates must be above ambg * most_likely_likelihood
+# candidates must be above b_ambiguous * most_likely_likelihood
 # if there are multiple candidates, it is an ambiguous section
-ambg = 0.5
+# lesser cuts more; higher makes ambiguous sections more likely
+# thus, higher is actually more stringent
+b_ambiguous = 0.4
+max_gap = 4
+thresh_conf = 0.25
+# lower bound for continuation of current hypothesis
+persistence = 0.25
 
-# similarity threshold for crossing hiccups
-# higher is more sensitive
-low_sim = 0.3
-
-# match parameters
-# match_bias = 0.5
-# penalty for lowering existing belief
-# match_pdrop = 1
-# penalty for alternate belief
-# match_palt = 0.5
-
+def debug_print(*args):
+	if __verbose:
+		print(args)
+		
 def ema(seq, inertia):
-	# exponential moving average
+	# mutating operation: exponential moving average applied over an array
 	for i in np.r_[1:np.size(seq, 0)]:
 		seq[i] = inertia * seq[i-1] + (1 - inertia) * seq[i]
 	return seq
 
-def trim(bvec, push = 1.0):
-	# push 0 -> bvec
-	# push 1 -> 1
-	# factor = (bvec + push * (1 - bvec)) = b + p - bp = b (1 - p) + p
-	t = 1.0 * (bvec > (ambg * np.max(bvec)))
-	if push == 1.0:
-		return t
-	else:
-		return (bvec * (1 - push) + push) * t
+def apply_with_window(origin, target, vfunction, width, wdirection = 'backwards'):
+	# wdirection must either be 'forwards' or 'backwards'
+	assert np.size(origin, 0) == np.size(target, 0)
+
+	# branching for efficiency? save calculations in loop?
+	if wdirection == 'backwards':
+		for i in np.r_[0:width]:
+			target[i] = vfunction(origin[ 0 : i ])
+		for i in np.r_[width:np.size(origin, 0)]:
+			target[i] = vfunction(origin[ i - width : i ])
+
+
+def trim(vector, factor):
+	return 1.0 * (vector > ((1 - factor) * np.max(vector)))
 
 def matches(belief, actual):
-	# see if the measured is allowed by the belief
-	# that which was high in belief should not decrease by too much
+	# How much does the observed value match the hypothesis
+	return 1 - np.linalg.norm(belief - actual)
 
-	# match lowered by:
-	# actual is lower on existing belief
-	# p_match = min(match_pdrop * np.sum((actual - belief)[trim(belief) == 1]), 0)
-	# actual is higher on alternate belief
-	# p_drop = match_palt * np.sum(actual[trim(belief) == 0])
+def do_basis_label(filename, metric = TensionModule.metric.dissonance):
+	pp = pprint.PrettyPrinter(indent=4)
+	roll = pickle.load(open(filename, 'rb'))
+	pp.pprint(vars(roll))
 
-	# similarity = match_bias - p_drop - p_match
-	# print(similarity)
-	# return similarity
-	return np.dot(belief, actual)
+	tens_mod = TensionModule.TensionModule(metric)
 
+	for tempo, group in roll.get_tape_groups().items():
+		max_gap = 2 * max([tape.min_common for tape in group])
 
-# for label in roll.labels:
-	# print("Label")
-	# pp.pprint(vars(label))
+		note_data = MusicRoll.combine_notes(group)
 
-for tempo, group in roll.get_tape_groups().items():
+		# Array - newness matters - simulate attentional decay
+		# @newness = 0 -> 1-k
+		# @newness = 1 -> 1
+		# factor = (1-k) + n * k
+		# 		 = 1 - k + nk = 1 - k * (n - 1)
+		orig_notes = note_data[...,0] * (1 - attn_decay * (note_data[...,1] - 1) )
 
-	print(group)
-	# for tape in group:
-		# pp.pprint(vars(tape))
+		duration = min(np.size(orig_notes, 0), __hard_limit)
+		notes = ema(np.tile(orig_notes, 1), n_smoothing)[:duration]
 
-	# Array - newness matters, as novelty strikes the ears - simulate attentional decay
-	note_data = MusicRoll.combine_notes(group)
+		# smoothing?
+		keys = np.r_[:np.size(notes, 1)]
 
-	# 0 -> 1-k
-	# 1 -> 1
-	# factor = (1-k) + n * k
-	# 		 = 1 - k + nk = 1 - k * (n - 1)
-	notes = note_data[...,0] * (1 - attn_decay * (note_data[...,1] - 1) )
-	orig_notes = notes
-
-	# smooth notes somewhat
-	notes = ema(np.tile(notes, 1), 0.25)
-
-	duration = np.size(notes, 0)
-	keys = np.r_[:np.size(notes, 1)]
-
-	fig1 = plt.figure(1, figsize = (5, 5))
-	
-	grid = AxesGrid(fig1, 111, 
-		nrows_ncols = (3, 1),
-		axes_pad = 0.05,
-		label_mode = "1",
-		)
-
-	
-
-	grid[2].locator_params(axis='y', nbins = 12)
-
-	basis_l = np.zeros((duration, 12))#likelihoods
-	basis_b = np.zeros((duration, 1)) - 1#labels
-	tension = np.zeros(duration)
-
-	def axis_basis(quanta):
-		actives = keys[quanta > 0.0001] + 3 # due to midi pitch nonsense - 0 is C
-		weights = quanta[quanta > 0.0001]
-		return tensions.basis_likelihood(np.vstack((actives, weights)).T)
-
-	def label(base, start, end):
-		if start == 0:
-			start -= 1
-		grid[2].broken_barh([(start + 1, end - start)], (base + 0.25 , 0.5), facecolors = 'red', alpha = 0.3)
-		basis_b[start:end] = base
-
-	def bar(time):
-		grid[2].broken_barh([(time, 0.1)], (0, 12), facecolors = 'red', alpha = 0.7)
-
-	def block(base, time):
-		grid[2].broken_barh([(time, 0.1)], (base + 0.25, 0.5), facecolors = 'blue', alpha = 0.7)
+		fig1 = plt.figure(1, figsize = (5, 5))
 		
-	# go through the time slices...
-	W = [[0, 0]]
-	E = [[0, 0]]
+		grid = AxesGrid(fig1, 111, 
+			nrows_ncols = (4, 1),
+			axes_pad = 0.05,
+			label_mode = "1",
+			)
 
-	# candidacy
-	candidate = -1
+		Plot_Bases = grid[3]
 
-	def label_basis():
-		# print("LBL", b_curr, W[0][0])
-		for base in tensions.v_basis[b_curr == np.max(b_curr)]:
-			label(base, W[0][0], W[0][1])
+		basis_prob = np.zeros((duration, 12)) 	  # likelihoods
+		basis_label = np.zeros((duration, 1)) - 1 # labels
+		tension = np.zeros(duration)
 
+		def axis_basis(quanta):
+			actives = keys[quanta > 0.0001] + 3 # due to midi pitch nonsense - 0 is C
+			weights = quanta[quanta > 0.0001]
+			return tens_mod.basis_likelihood(np.vstack((actives, weights)).T)
 
-	while W[0][1] < duration:
-		# big window
-		if W[0][1] - W[0][0] >= w_lmin:
-			# get current candidates
-			section = np.sum(notes[W[0][0]:W[0][1]+1], 0)
-			basis_l[W[0][1]] = b_curr = axis_basis(section)
-			section = np.sum(orig_notes[W[0][0]:W[0][1]+1], 0)
-			tension[W[0][1]] = tensions.selfTension(section)
-			# print("CUR", cand_curr, W[0][1])
+		def label(base, start, end):
+			if start == 0:
+				start -= 1
+			Plot_Bases.broken_barh([(start + 1, end - start - 1)], (base + 0.25 , 0.5), facecolors = 'red', alpha = 0.3, linewidth = 0)
+			basis_label[start + 1:end] = base
 
-			# check the next part to see if it is a subset of current candidates, or doesn't match
-			E[0][0] = 1
-			similarity = 0
-			while E[0][0] < w_emin and W[0][1] + E[0][0] < duration and similarity < low_sim:
-				b_next = axis_basis(notes[W[0][1] + E[0][0]])
-				# print("NXT", cand_next, W[0][1] + E[0][0])
-				# print(tensions.v_basis[trim(b_curr) > ambg])
-				similarity = matches(trim(b_curr, 1), b_next)
-				# print("SHR", similarity)
+		def bar(time):
+			Plot_Bases.broken_barh([(time, 0.1)], (0, 12), facecolors = 'red', alpha = 0.7, linewidth = 0)
 
-				if similarity < low_sim:
-					E[0][0] += 1
+		def block(base, start, end, color):
+			if __block:
+				Plot_Bases.broken_barh([(start + 1, end - start)], (base + 0.25, 0.5), facecolors = color, alpha = 1.0, linewidth = 0)
 			
-			# now that we are out of that, see if we exceeded the window - otherwise it was similar so we can proceed as usual
-			# became dissimilar
-			if similarity < low_sim:
-				# does the beginning of the window agree with the end?
-				# (problem of the cooking frog - alternate candidate increased slowly, displacing the original candidate(s))
+		# go through the time slices...
+		left = 0
+		right = 0
+		reach = 0
+		candidate = None
+		confidence = 0 # SHOULD BE USED
 
-				bar(W[0][1] + 1)
-				# label_basis()
-				W[0][0] = W[0][1]
-		# small window
-		else:
-			basis_l[W[0][1]] = b_curr = axis_basis(notes[W[0][1]])
-			tension[W[0][1]] = tensions.selfTension(np.sum(orig_notes[W[0][0]:W[0][1]+1], 0))
-			# TODO also label here?
+		def notes_in_time(start, end):
+			return np.sum(note_data[start:end,:,1])
 
-		W[0][1] += 1
+		def label_basis():
+			if candidate == None:
+				for base in TensionModule.v_basis[b_curr == np.max(b_curr)]:
+					label(base, left - 1, right + 1)
+			else:
+				label(candidate, left - 1, right + 1)
 
-		# back-label
+		def get_cand(notes):
+			# return (candidate, confidence)
+			return (trim(b_curr, b_ambiguous), np.max(b_curr))
 
-	# label when hitting end
-	# label_basis()
+		while right < duration and right < __hard_limit:
+			# report
+			if right % __report_interval == 0:
+				print('{0}/{1}...'.format(right, duration))
 
-	"""
-	It's like this.
-	Doing one run doesn't really cut it - we have to do another run to actually label.
-	Mostly, due to the impact that ambg has on the actual "smoothing" and "inference."
+			# If we didn't have a candidate, try to check for one
+			if candidate == None:
+				# get current hypothesis from accumulated notes
+				confidence_factor = 1 - 1/(notes_in_time(left, right + 1) + 1)
+				section = np.sum(notes[left:right+1], 0)
 
-	There are several approaches to this 1D Sliding Window Detection
+				b_curr = axis_basis(section) * confidence_factor
 
-		Window identification and merging
-			This is a granular approach but should be pretty reliable for large-scale identification.
-			This will probably misbehave for highly varied bases.
-			< L/W * Log2(L/W) >
-		Top-down window division sliding
-			Probably inefficient
-			< L^2 / W >
-		Candidacy abandoning w/ forward-pushing window, bridging gaps
-			Is a gap supposed to be bridged?
-			Jump a gap instead?
-				Label across gap, or...?
-			< 2L (probe all gaps, bridge as much as possible ) >
+				basis_prob[right] = b_curr
+				tension[right] = tens_mod.selfTension(section)
 
-	In all approaches, confidence should be adjusted by number of notes available
-		This info can be gotten through summing "newness" across the section in the window.
-		Probably:
-			multiply by < 1 - (1/notes) >
-	"""
+				(try_cand, try_conf) = get_cand(b_curr)
+
+				# make sure there is only one candidate, and that it is confident enough
+				if np.sum(try_cand) == 1 and try_conf > thresh_conf:
+					# found a candidate
+					debug_print('got', right, try_cand, try_conf)
+					block(-0.5, right - 1, right, 'purple')
+					candidate = TensionModule.v_basis[try_cand > b_ambiguous][0]
+					confidence = try_conf
+				else:
+					# no candidate / still ambiguous
+					if np.sum(try_cand) > 1:
+						debug_print('non', right, 'multiple')
+					else:
+						debug_print('non', right, try_conf, '<', thresh_conf)
+					block(-0.5, right - 1, right, 'blue')
+			# If there is a candidate, check to see if the next observed slice follows
+			else:
+				reach = 0
+				similarity = -1
+
+				# attempt to bridge gap if dissimilarity is seen
+				while reach < max_gap and right + reach < duration and similarity < persistence:
+					# check if the following slice fits the hypothesis
+					# section = np.vstack((notes[left:right+1], notes[right + reach]))
+					# b_next = axis_basis(np.sum(section, 0))
+					b_next = axis_basis(notes[right + reach])
+					(try_cand, try_conf) = get_cand(b_next)
+
+					# similarity = matches(trim(b_curr, b_ambiguous, 1), b_next)
+					similarity = b_next[candidate]
+					debug_print('chk', right, right + reach, 'cnd', candidate, similarity)
+					reach += 1
+
+				# exited due to similarity - can extend
+				if similarity >= persistence or right + reach >= duration:
+					block(-0.5, right - 1, right, 'green')
+
+					debug_print('ext', right, similarity)
+					# all's right - we can aggregate this slice
+					section = np.sum(notes[left:right+1], 0)
+					# basis_prob[right] = b_curr = axis_basis(section)
+					basis_prob[right] = b_curr = axis_basis(notes[right])
+					tension[right] = tens_mod.selfTension(section)
+				# a gap was found and was too large
+				elif similarity < persistence and reach >= max_gap:
+					block(0, right - 1, right, 'yellow')
+					debug_print('rev', right, similarity, list(b_next))
+					bar(right)
+					right -= 1
+					label_basis()
+					candidate = None
+					left = right + 1
+
+			right += 1
+
+			# back-label
+
+		# label when hitting end
+		label_basis()
+
+		# basis_prob = np.apply_along_axis(axis_basis, 1, notes)
+		# ema(basis_prob, 0.2)
+
+		grid[0].set_title("{0} group {1}".format(roll.filepath, tempo))
+		
+		Plot_Bases.locator_params(axis='y', nbins = 12)
+
+		min_note = min([tape.min_note for tape in group])
+		max_note = max([tape.max_note for tape in group])
+
+		grid[0].plot(np.r_[:duration] + 0.5, 2 * tension / np.max(tension), 'k')
+		grid[1].imshow(notes.T[min_note:max_note + 1],
+			interpolation = 'none',
+			cmap = plt.cm.Oranges,
+			origin = 'lower',
+			extent=[0, duration, 0, 12],
+			aspect = 0.5 * duration / 24)
+		Plot_Bases.imshow(basis_prob.T,
+			interpolation = 'none', 
+			cmap = plt.cm.Greys,
+			origin = 'lower',
+			extent=[0, duration, 0, 12],
+			aspect = 0.5 * duration / 24)
+		grid[2].imshow(basis_label.T,
+			interpolation = 'none', 
+			cmap = plt.cm.jet,
+			origin = 'lower',
+			extent=[0, duration, 0, 12],
+			aspect = 0.5 * duration / (24 * 3))
+
+		# print(basis_label)
+
+		plt.show()
+
+		# TODO label afterwards, and re-pickle
+
+	# This is really a classification problem that ought to be addressed with the proper tools
+
+
+
+	# get it to mark what actions it took - exploring, backlabelling
+	# prevent "consecutive self-labelling" for example
+	# and also smooth away hiccups
+
+# from pycallgraph import PyCallGraph
+# from pycallgraph.output import GraphvizOutput
+if __name__ == '__main__':
+	# with PyCallGraph(output=GraphvizOutput(output_file = "BASIS.png")):
 	
-	#####################
-	### labelling run ###
-	#####################
-
-	# forward-pushing, bridging gaps
-
-	# singular candidate for basis
-	l_cand = -1
-	# cutting threshold for settling on a candidate
-	l_ambg = 0.5
-	# drop percentage for abandoning candidate (and perform label)
-	l_chng = 0.2
-	# granularity. the size at which it's no longer a gap / minimum label width
-	l_gaps = 4
-
-	lleft = 0 # start of section to label - for bridging gaps
-	left = 0  # start of section to examine
-	right = 0 # 
-	while right < duration:
-		# while smaller than window
-		while right - lleft < l_gaps:
-			# attempt to find candidate
-			
-
-		# tcandidate, tconfidence = factor * best @ right
-		# update best confidence if more confident
-
-		# HAVE CANDIDATE
-		# if best match prev and confidence didn't drop over chng and confidence is good enough:
-			# keep going
-		# DON'T HAVE CANDIDATE
-		# else:
-			# start an exploration here at 'E'
-				# get best @ E
-					# if best match this match
-						# if past window?
-							
-
-		right += 1
-
-	# basis_l = np.apply_along_axis(axis_basis, 1, notes)
-
-	grid[0].set_title("{0} group {1}".format(roll.filepath, tempo))
-	min_note = min([tape.min_note for tape in group])
-	max_note = max([tape.max_note for tape in group])
-
-	grid[0].plot(np.r_[:duration] + 0.5, 100 * tension, 'k')
-	grid[1].imshow(notes.T[min_note:max_note + 1],
-		interpolation = 'none',
-		cmap = plt.cm.Oranges,
-		origin = 'lower',
-		extent=[0, duration, 0, 12],
-		aspect = 0.5 * duration / 12)
-	grid[2].imshow(basis_l.T,
-		interpolation = 'none', 
-		cmap = plt.cm.Greys,
-		origin = 'lower',
-		extent=[0, duration, 0, 12],
-		aspect = 0.5 * duration / 24)
-
-	# print(basis_b)
-
-	plt.show()
-
-
-# This is really a classification problem that ought to be addressed with the proper tools
+	# do_basis_label('./mid/bach/aof/can1.mrl', dissonance_metric)
+	do_basis_label('./mid/moldau_single.mrl', TensionModule.metric.western)
+	do_basis_label('./mid/moldau_accomp.mrl', TensionModule.metric.western)
+	# do_basis_label('./mid/bach/aof/can1.mrl', TensionModule.metric.western)
+	# do_basis_label('./mid/oldyuanxian2.mrl', TensionModule.metric.western)
+	# do_basis_label('./mid/mary.mrl')
+	# do_basis_label('./mid/ambigious_test.mrl', TensionModule.metric.western) # lowsim 0.3 - 0.35
+	# do_basis_label('./mid/ivivi.mrl', TensionModule.metric.western) # lowsim 0.5
 
 
 
-# get it to mark what actions it took - exploring, backlabelling
-# prevent "consecutive self-labelling" for example
-# and also smooth away hiccups
+"""
+TODO: Confidence in labelling - should be used
+TODO: Make sure no OTHER candidate surpasses the first before extending
+"""
+
+
+"""
+Entirely hopeless; needs restart.
+
+ON NEXT TRY:
+	1: Interleave note activation times in MusicRoll instead of producing the actual timeseries.
+	(Timeseries for use with neural model)
+	2: Bias towards "sensible" shifts from previous basis (circle of fifths distance)
+"""

@@ -1,0 +1,78 @@
+Zicheng Gao
+
+A initial attempt was made before consulting the relevant literature.
+
+	On a model of basis probability using tension:
+		
+		By mapping intervals to tensions, I could first measure the internal tensions of any slice of notes by looking at all internal tensions.
+
+		Holding that tension would be inverse to the "stability" of some group,
+		We can then evaluate the tension of a group with each of the 12 notes added on.
+
+		By evaluating the "salient tension" (borrowing from Rowe) for each hypothetical one, we can then use the negative log (using these tensions as energy) to calculate probability. Afterward, a softmax can be applied.
+
+		(After some point, this model was simplified somewhat due to the exponentiation carried out in the application of the interval-to-tension metric.)
+
+	On the process of labelling basis:
+
+		I designed and used a "hypothesis-matching" model.
+
+			In the general sense, we can evaluate this as a 2-phase state machine.
+
+			We have:
+				Narrowing: In which we try to establish a hypothesis about the basis
+				Extending: In which we try to gague the extent to which it applies
+
+			In the narrowing phase (no current hypothesis):
+				Read the next group of notes
+				Try to establish a hypothesis
+				If there is a hypothesis, go to the extending phase
+				Otherwise, keep reading to try and narrow the hypothesis
+
+			In the extending phase (singular hypothesis held):
+				Read the next group of notes
+				Evaluate whether or not the group fits the hypothesis
+				If it does not, apply the label up to now,
+					and reconsider this point in the narrowing phase.
+				If it fits, keep reading
+
+		In the specific case, the evaluations consisted of:
+			To establish a hypothesis:
+				Sum up notes from the beginning of the section according to weights
+				Calculate basis likelihoods using a metric
+				Calculate a confidence factor based on the amount of notes in the section
+				Trim the basis likelihoods over a fraction of the maximum candidate's
+
+				If the confidence is over a threshold and there are not multiple candidates,
+				The hypothesis becomes that candidate.
+
+			To evaluate hypothesis-matching:
+				For the next slices within the gap-filling distance, calculate the probability for the current candidate basis until either the probability exceeds the continuation threshold or the distance exceeds the gap-filling distance. ("Reach")
+
+				This is supposed to model a "reluctance" to change basis.
+
+				(This is intended to skip over neighbour tones and brief interruptions)
+
+				If the distance was exceeded, it does not fit.
+				Otherwise, it fits.
+
+		This model encountered some problems:
+			Becoming stuck in the narrowing phase
+
+After consulting the literature, most prominently:
+	Vos, Piet G., and Erwin W. Van Geenen. “A Parallel-Processing Key-Finding Model.” Music Perception: An Interdisciplinary Journal, vol. 14, no. 2, 1996, pp. 185–223. www.jstor.org/stable/40285717.
+
+	Solutions:
+		
+
+		Limit the memory size (notes before a certain time are forgotten)
+
+		Switch to point-based rating instead of the tension-metric basis
+			(Trying to co-opt the two does not seem to work)
+
+		Use a scalar model in addition
+
+		Deal with voice leading (Somehow, exclude these notes from the hypothesis?)
+
+		Separate different models (scalar, chordal) instead of co-opting them as metrics
+

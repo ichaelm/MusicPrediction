@@ -74,9 +74,9 @@ class MusicRoll:
 		output = np.zeros((end - beginning, 127, 2))
 
 		for tape in tapelist:
-			src = tape.timeseries()[:tape.length]
+			src = tape.timeseries()[:tape.length, :, :]
 			# print("Tapelen", tape.length)
-			output[tape.start_time - beginning:tape.start_time - beginning + tape.length] += src
+			output[tape.start_time - beginning:tape.start_time - beginning + tape.length,:] += src
 
 		return output
 
@@ -115,9 +115,12 @@ class MusicTape:
 		self.instrument = instrument
 		self.min_note = 127
 		self.max_note = 0
+		self.notes = 0
 
 	def addNoteEvent(self, etype, note, velocity, time):
 		self.data.append( [etype, note, velocity, time // 256, time % 256] )
+		if etype == MusicTape.NOTE_ON:
+			self.notes += 1
 		if note > self.max_note:
 			self.max_note = note
 		if note < self.min_note:
